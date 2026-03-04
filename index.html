@@ -2276,706 +2276,206 @@ const SessionManager = {
 // GESTIONNAIRE DE NOTIFICATIONS AMÉLIORÉ
 // ============================================
 const NotificationManager = {
-    processedNotifications: new Set(),
-    notificationExpiryDays: 7, // 1 semaine
-    
+    processed: new Map(), // id → timestamp
+    expiryDays: 7,
+    maxNotifications: 100,
+
     init() {
-        this.loadProcessedNotifications();
-        this.startCleanupInterval();
+        this.loadProcessed();
+        this.loadNotifications();
+        this.startCleanup();
     },
-    
-    // Charger les notifications déjà traitées
-    loadProcessedNotifications() {
-        try {
-            const processed = localStorage.getItem('processed_notifications');
-            if (processed) {
-                const data = JSON.parse(processed);
-                const oneWeekAgo = Date.now() - (this.notificationExpiryDays * 24 * 60 * 60 * 1000);
-                
-                Object.entries(data).forEach(([key, timestamp]) => {
-                    if (timestamp > oneWeekAgo) {
-                        this.processedNotifications.add(key);
-                    }
-                });
-            }
-        } catch (error) {
-            console.error('Erreur chargement notifications traitées:', error);
-        }
+
+    // ========================
+    // PROCESSED MANAGEMENT
+    // ========================
+
+    loadProcessed() {
+        const raw = localStorage.getItem('processed_notifications');
+        if (!raw) return;
+
+        const data = JSON.parse(raw);
+        const expiry = Date.now() - this.expiryDays * 86400000;
+
+        Object.entries(data).forEach(([id, ts]) => {
+            if (ts > expiry) this.processed.set(id, ts);
+        });
     },
-    
-    // Sauvegarder les notifications traitées
-    saveProcessedNotifications() {
-        try {
-            const data = {};
-            this.processedNotifications.forEach(key => {
-                data[key] = Date.now();
-            });
-            localStorage.setItem('processed_notifications', JSON.stringify(data));
-        } catch (error) {
-            console.error('Erreur sauvegarde notifications traitées:', error);
-        }
+
+    saveProcessed() {
+        const obj = {};
+        this.processed.forEach((ts, id) => obj[id] = ts);
+        localStorage.setItem('processed_notifications', JSON.stringify(obj));
     },
-    
-    // Marquer une notification comme traitée
-    markAsProcessed(notificationId, type) {
-        const key = `${type}_${notificationId}`;
-        this.processedNotifications.add(key);
-        this.saveProcessedNotifications();
+
+    isProcessed(id) {
+        return this.processed.has(id);
     },
-    
-    // Vérifier si une notification a déjà été traitée
-    isProcessed(notificationId, type) {
-        const key = `${type}_${notificationId}`;
-        return this.processedNotifications.has(key);
+
+    markProcessed(id) {
+        this.processed.set(id, Date.now());
+        this.saveProcessed();
     },
-    
-    // Nettoyer les vieilles notifications (toutes les heures)
-    startCleanupInterval() {
-        setInterval(() => {
-            this.cleanupOldNotifications();
-        }, 60 * 60 * 1000);
-    },
-    
-    // Nettoyer les notifications de plus d'1 semaine
-    cleanupOldNotifications() {
-        try {
-            const processed = localStorage.getItem('processed_notifications');
-            if (processed) {
-                const data = JSON.parse(processed);
-                const oneWeekAgo = Date.now() - (this.notificationExpiryDays * 24 * 60 * 60 * 1000);
-                let cleaned = false;
-                
-                Object.entries(data).forEach(([key, timestamp]) => {
-                    if (timestamp < oneWeekAgo) {
-                        delete data[key];
-                        this.processedNotifications.delete(key);
-                        cleaned = true;
-                    }
-                });
-                
-                if (cleaned) {
-                    localStorage.setItem('processed_notifications', JSON.stringify(data));
-                }
-            }
-            
-            // Nettoyer aussi les notifications stockées
-            this.cleanupStoredNotifications();
-            
-        } catch (error) {
-            console.error('Erreur nettoyage notifications:', error);
-        }
-    },
-    
-    // Nettoyer les notifications stockées de plus d'1 semaine
-    cleanupStoredNotifications() {
-        try {
-            const saved = localStorage.getItem('notifications');
-            if (saved) {
-                const allNotifications = JSON.parse(saved);
-                const oneWeekAgo = Date.now() - (this.notificationExpiryDays * 24 * 60 * 60 * 1000);
-                
-                const filtered = allNotifications.filter(n => 
-                    new Date(n.timestamp).getTime() > oneWeekAgo
-                );
-                
-                if (filtered.length !== allNotifications.length) {
-                    localStorage.setItem('notifications', JSON.stringify(filtered));
-                    notifications = filtered;
-                    
-                    // Mettre à jour le compteur
-                    const unread = filtered.filter(n => !n.read).length;
-                    updateNotificationCount(unread - (window.currentUnread || 0));
-                }
-            }
-        } catch (error) {
-            console.error('Erreur nettoyage stockage:', error);
-        }
-    },
-    
-    // Sauvegarder les notifications
+
+    // ========================
+    // NOTIFICATIONS STORAGE
+    // ========================
+
     saveNotifications() {
-        // Limiter à 100 notifications max
-        if (notifications.length > 100) {
-            notifications = notifications.slice(0, 100);
-        }
+        notifications = notifications
+            .sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp))
+            .slice(0, this.maxNotifications);
+
         localStorage.setItem('notifications', JSON.stringify(notifications));
     },
-    
-    // Charger les notifications
-    loadNotifications() {
-        try {
-            const saved = localStorage.getItem('notifications');
-            if (saved) {
-                notifications = JSON.parse(saved);
-                
-                // Filtrer les notifications supprimées et expirées
-                const oneWeekAgo = Date.now() - (this.notificationExpiryDays * 24 * 60 * 60 * 1000);
-                notifications = notifications.filter(n => {
-                    const notExpired = new Date(n.timestamp).getTime() > oneWeekAgo;
-                    const notDeleted = !this.isProcessed(n.id, 'deleted');
-                    return notExpired && notDeleted;
-                });
-                
-                const unread = notifications.filter(n => !n.read).length;
-                updateNotificationCount(unread);
-            }
-        } catch (error) {
-            console.error('Erreur chargement notifications:', error);
-            notifications = [];
-        }
-    },
-    
-    // Supprimer une notification définitivement
-    async deleteNotification(notificationId) {
-        try {
-            const index = notifications.findIndex(n => n.id === notificationId);
-            if (index !== -1) {
-                const wasUnread = !notifications[index].read;
-                notifications.splice(index, 1);
-                
-                this.markAsProcessed(notificationId, 'deleted');
-                this.saveNotifications();
-                
-                if (wasUnread) {
-                    const currentUnread = notifications.filter(n => !n.read).length;
-                    updateNotificationCount(currentUnread);
-                }
-                return true;
-            }
-            return false;
-        } catch (error) {
-            console.error('Erreur suppression notification:', error);
-            return false;
-        }
-    }
-};
 
-// ============================================
-// GESTIONNAIRE DE NOTIFICATIONS EN TEMPS RÉEL - CORRIGÉ
-// ============================================
-const RealTimeNotificationManager = {
-    listeners: [],
-    lastProcessedIds: new Set(), // Pour éviter les doublons en session
-    
-    setupListeners() {
-        if (!currentParent || childrenList.length === 0) return;
-        
-        console.log('📡 Configuration des écouteurs en temps réel...');
-        this.cleanup();
-        this.lastProcessedIds.clear();
-        
-        // Écouter TOUS les types pour TOUS les enfants
-        childrenList.forEach(child => {
-            console.log(`Configuration pour ${child.fullName} (${child.type})`);
-            
-            this.setupIncidentsListener(child);
-            this.setupAttendanceListener(child);
-            this.setupGradesListener(child);
-            this.setupHomeworkListener(child);
-            this.setupPaymentsListener(child);
-            this.setupCommuniquesListener(child);
-            this.setupTimetableListener(child);
-        });
-    },
-    
-    cleanup() {
-        this.listeners.forEach(unsubscribe => {
-            if (typeof unsubscribe === 'function') unsubscribe();
-        });
-        this.listeners = [];
-    },
-    
-    // Fonction utilitaire pour éviter les doublons
-    shouldProcessNotification(id) {
-        if (this.lastProcessedIds.has(id)) {
-            console.log('Notification déjà traitée dans cette session:', id);
-            return false;
-        }
-        
-        if (NotificationManager.isProcessed(id)) {
-            console.log('Notification déjà traitée (persistante):', id);
-            return false;
-        }
-        
-        this.lastProcessedIds.add(id);
-        
-        // Nettoyer le Set après 10 secondes
-        setTimeout(() => {
-            this.lastProcessedIds.delete(id);
-        }, 10000);
-        
-        return true;
-    },
-    
-    // INCIDENTS
-    setupIncidentsListener(child) {
-        console.log(`🔴 Configuration incidents pour ${child.fullName}`);
-        
-        const incidentsQuery = query(
-            collection(db, 'incidents'),
-            where('studentMatricule', '==', child.matricule),
-            orderBy('createdAt', 'desc'),
-            limit(5)
-        );
-        
-        const unsubscribe = onSnapshot(incidentsQuery, (snapshot) => {
-            snapshot.docChanges().forEach(change => {
-                if (change.type === 'added') {
-                    const inc = change.doc.data();
-                    const created = inc.createdAt?.toDate() || new Date();
-                    
-                    // Ne pas notifier les incidents trop vieux
-                    const oneWeekAgo = new Date();
-                    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-                    if (created < oneWeekAgo) return;
-                    
-                    const notifId = `incident_${change.doc.id}`;
-                    
-                    if (this.shouldProcessNotification(notifId)) {
-                        console.log('📨 Nouvel incident détecté:', inc);
-                        
-                        const notif = {
-                            id: notifId,
-                            title: '⚠️ Nouvel incident',
-                            body: `${child.fullName}: ${inc.type || 'Incident'} - ${inc.description?.substring(0, 50) || ''}`,
-                            type: 'incidents',
-                            icon: 'fa-exclamation-triangle',
-                            data: { 
-                                page: 'presence-incidents', 
-                                childId: child.matricule, 
-                                childName: child.fullName,
-                                incidentId: change.doc.id,
-                                severity: inc.severity
-                            },
-                            timestamp: created.toISOString(),
-                            read: false
-                        };
-                        
-                        this.addNotification(notif);
-                    }
-                }
-            });
-        }, (error) => {
-            console.error('Erreur écoute incidents:', error);
-        });
-        
-        this.listeners.push(unsubscribe);
-    },
-    
-    // PRÉSENCES - CORRIGÉ
-    setupAttendanceListener(child) {
-        console.log(`📅 Configuration présences pour ${child.fullName}`);
-        
-        const attendanceQuery = query(
-            collection(db, 'student_attendance'),
-            where('studentId', '==', child.matricule),
-            where('published', '==', true),
-            orderBy('date', 'desc'),
-            limit(5)
-        );
-        
-        const unsubscribe = onSnapshot(attendanceQuery, (snapshot) => {
-            snapshot.docChanges().forEach(change => {
-                if (change.type === 'added') {
-                    const att = change.doc.data();
-                    const date = new Date(att.date);
-                    
-                    // Ne pas notifier les présences trop vieilles
-                    const oneWeekAgo = new Date();
-                    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-                    if (date < oneWeekAgo) return;
-                    
-                    const notifId = `attendance_${change.doc.id}`;
-                    
-                    if (this.shouldProcessNotification(notifId)) {
-                        console.log('📨 Nouvelle présence détectée:', att);
-                        
-                        let statusText = '';
-                        let emoji = '';
-                        
-                        if (att.status === 'present') {
-                            statusText = 'présent(e)';
-                            emoji = '✅';
-                        } else if (att.status === 'absent') {
-                            statusText = 'absent(e)';
-                            emoji = '❌';
-                        } else if (att.status === 'late') {
-                            statusText = 'en retard';
-                            emoji = '⏰';
-                        } else {
-                            return; // Ignorer les statuts inconnus
-                        }
-                        
-                        const dateStr = date.toLocaleDateString('fr-FR');
-                        
-                        const notif = {
-                            id: notifId,
-                            title: `${emoji} Présence enregistrée`,
-                            body: `${child.fullName} est ${statusText} le ${dateStr}`,
-                            type: 'presence',
-                            icon: 'fa-calendar-check',
-                            data: { 
-                                page: 'presence-incidents', 
-                                childId: child.matricule, 
-                                childName: child.fullName,
-                                status: att.status,
-                                date: att.date
-                            },
-                            timestamp: date.toISOString(),
-                            read: false
-                        };
-                        
-                        this.addNotification(notif);
-                    }
-                }
-            });
-        }, (error) => {
-            console.error('Erreur écoute présences:', error);
-        });
-        
-        this.listeners.push(unsubscribe);
-    },
-    
-    // NOTES - CORRIGÉ
-    setupGradesListener(child) {
-        if (child.type !== 'secondary') return;
-        
-        console.log(`📊 Configuration notes pour ${child.fullName}`);
-        
-        const gradesQuery = query(
-            collection(db, 'published_grades'),
-            where('className', '==', child.class),
-            orderBy('publishedAt', 'desc'),
-            limit(10)
-        );
-        
-        const unsubscribe = onSnapshot(gradesQuery, (snapshot) => {
-            snapshot.docChanges().forEach(change => {
-                if (change.type === 'added') {
-                    const grade = change.doc.data();
-                    const published = grade.publishedAt?.toDate() || new Date();
-                    
-                    // Ne pas notifier les notes trop vieilles
-                    const oneWeekAgo = new Date();
-                    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-                    if (published < oneWeekAgo) return;
-                    
-                    const studentGrade = grade.grades?.find(g => g.studentMatricule === child.matricule);
-                    
-                    if (studentGrade) {
-                        const notifId = `grade_${change.doc.id}_${child.matricule}`;
-                        
-                        if (this.shouldProcessNotification(notifId)) {
-                            console.log('📨 Nouvelle note détectée:', grade);
-                            
-                            const percentage = (studentGrade.grade / grade.maxPoints * 100).toFixed(0);
-                            
-                            const notif = {
-                                id: notifId,
-                                title: '📊 Nouvelle note',
-                                body: `${child.fullName}: ${grade.subject} - ${studentGrade.grade}/${grade.maxPoints} (${percentage}%)`,
-                                type: 'grades',
-                                icon: 'fa-chart-line',
-                                data: { 
-                                    page: 'grades', 
-                                    childId: child.matricule, 
-                                    childName: child.fullName,
-                                    subject: grade.subject,
-                                    grade: studentGrade.grade,
-                                    maxPoints: grade.maxPoints
-                                },
-                                timestamp: published.toISOString(),
-                                read: false
-                            };
-                            
-                            this.addNotification(notif);
-                        }
-                    }
-                }
-            });
-        }, (error) => {
-            console.error('Erreur écoute notes:', error);
-        });
-        
-        this.listeners.push(unsubscribe);
-    },
-    
-    // DEVOIRS - CORRIGÉ
-    setupHomeworkListener(child) {
-        if (child.type !== 'secondary') return;
-        
-        console.log(`📚 Configuration devoirs pour ${child.fullName}`);
-        
-        const homeworkQuery = query(
-            collection(db, 'homework'),
-            where('className', '==', child.class),
-            orderBy('createdAt', 'desc'),
-            limit(10)
-        );
-        
-        const unsubscribe = onSnapshot(homeworkQuery, (snapshot) => {
-            snapshot.docChanges().forEach(change => {
-                if (change.type === 'added') {
-                    const hw = change.doc.data();
-                    const created = hw.createdAt?.toDate() || new Date();
-                    
-                    // Ne pas notifier les devoirs trop vieux
-                    const oneWeekAgo = new Date();
-                    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-                    if (created < oneWeekAgo) return;
-                    
-                    const notifId = `homework_${change.doc.id}`;
-                    
-                    if (this.shouldProcessNotification(notifId)) {
-                        console.log('📨 Nouveau devoir détecté:', hw);
-                        
-                        const dueDate = hw.dueDate?.toDate();
-                        const dueStr = dueDate ? dueDate.toLocaleDateString('fr-FR') : 'Date inconnue';
-                        
-                        const notif = {
-                            id: notifId,
-                            title: '📚 Nouveau devoir',
-                            body: `${child.fullName}: ${hw.subject} - ${hw.title} (À rendre: ${dueStr})`,
-                            type: 'homework',
-                            icon: 'fa-book-open',
-                            data: { 
-                                page: 'homework', 
-                                childId: child.matricule, 
-                                childName: child.fullName,
-                                subject: hw.subject,
-                                title: hw.title,
-                                dueDate: hw.dueDate?.toDate().toISOString()
-                            },
-                            timestamp: created.toISOString(),
-                            read: false
-                        };
-                        
-                        this.addNotification(notif);
-                    }
-                }
-            });
-        }, (error) => {
-            console.error('Erreur écoute devoirs:', error);
-        });
-        
-        this.listeners.push(unsubscribe);
-    },
-    
-    // PAIEMENTS - CORRIGÉ
-    setupPaymentsListener(child) {
-        console.log(`💰 Configuration paiements pour ${child.fullName}`);
-        
-        const paymentsQuery = query(
-            collection(db, 'payments'),
-            where('studentId', '==', child.matricule),
-            orderBy('createdAt', 'desc'),
-            limit(5)
-        );
-        
-        const unsubscribe = onSnapshot(paymentsQuery, (snapshot) => {
-            snapshot.docChanges().forEach(change => {
-                if (change.type === 'added') {
-                    const payment = change.doc.data();
-                    const created = payment.createdAt?.toDate() || new Date();
-                    
-                    // Ne pas notifier les paiements trop vieux
-                    const oneWeekAgo = new Date();
-                    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-                    if (created < oneWeekAgo) return;
-                    
-                    const notifId = `payment_${change.doc.id}`;
-                    
-                    if (this.shouldProcessNotification(notifId)) {
-                        console.log('📨 Nouveau paiement détecté:', payment);
-                        
-                        const notif = {
-                            id: notifId,
-                            title: '💰 Paiement enregistré',
-                            body: `${child.fullName}: ${payment.month || 'Mois'} - ${payment.amount || 0} FCFA`,
-                            type: 'payments',
-                            icon: 'fa-money-bill-wave',
-                            data: { 
-                                page: 'payments', 
-                                childId: child.matricule, 
-                                childName: child.fullName,
-                                month: payment.month,
-                                amount: payment.amount
-                            },
-                            timestamp: created.toISOString(),
-                            read: false
-                        };
-                        
-                        this.addNotification(notif);
-                    }
-                }
-            });
-        }, (error) => {
-            console.error('Erreur écoute paiements:', error);
-        });
-        
-        this.listeners.push(unsubscribe);
-    },
-    
-    // COMMUNIQUÉS - CORRIGÉ
-    setupCommuniquesListener(child) {
-        console.log(`📄 Configuration communiqués pour ${child.fullName}`);
-        
-        if (!currentParent) return;
-        
-        const communiquesQuery = query(
-            collection(db, 'parent_communique_relations'),
-            where('parentId', '==', currentParent.matricule),
-            where('studentIds', 'array-contains', child.matricule),
-            orderBy('createdAt', 'desc'),
-            limit(5)
-        );
-        
-        const unsubscribe = onSnapshot(communiquesQuery, (snapshot) => {
-            snapshot.docChanges().forEach(change => {
-                if (change.type === 'added') {
-                    const rel = change.doc.data();
-                    const created = rel.createdAt?.toDate() || new Date();
-                    
-                    // Ne pas notifier les communiqués trop vieux
-                    const oneWeekAgo = new Date();
-                    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-                    if (created < oneWeekAgo) return;
-                    
-                    const notifId = `communique_${change.doc.id}`;
-                    
-                    if (this.shouldProcessNotification(notifId)) {
-                        console.log('📨 Nouveau communiqué détecté:', rel);
-                        this.fetchCommuniqueDetails(rel.communiqueId, child, created);
-                    }
-                }
-            });
-        }, (error) => {
-            console.error('Erreur écoute communiqués:', error);
-        });
-        
-        this.listeners.push(unsubscribe);
-    },
-    
-    async fetchCommuniqueDetails(communiqueId, child, created) {
-        try {
-            const comDoc = await getDoc(doc(db, 'parent_communiques', communiqueId));
-            if (comDoc.exists()) {
-                const com = comDoc.data();
-                const deadline = com.deadline?.toDate();
-                const daysLeft = deadline ? Math.ceil((deadline - new Date()) / (1000*60*60*24)) : '?';
-                
-                const notifId = `communique_detail_${communiqueId}`;
-                
-                if (this.shouldProcessNotification(notifId)) {
-                    const notif = {
-                        id: notifId,
-                        title: '📄 Nouveau communiqué',
-                        body: `${com.feeType || 'Frais'} - ${com.amount || 0} FCFA (Échéance: ${daysLeft} jour(s))`,
-                        type: 'communiques',
-                        icon: 'fa-newspaper',
-                        data: { 
-                            page: 'communiques', 
-                            childId: child.matricule, 
-                            childName: child.fullName,
-                            feeType: com.feeType,
-                            amount: com.amount,
-                            deadline: deadline?.toISOString()
-                        },
-                        timestamp: created.toISOString(),
-                        read: false
-                    };
-                    
-                    this.addNotification(notif);
-                }
-            }
-        } catch (error) {
-            console.error('Erreur chargement communiqué:', error);
-        }
-    },
-    
-    // EMPLOI DU TEMPS - CORRIGÉ
-    setupTimetableListener(child) {
-        console.log(`⏰ Configuration emploi du temps pour ${child.fullName}`);
-        
-        const timetableQuery = query(
-            collection(db, 'class_schedules'),
-            where('className', '==', child.class),
-            orderBy('publishedAt', 'desc'),
-            limit(5)
-        );
-        
-        const unsubscribe = onSnapshot(timetableQuery, (snapshot) => {
-            snapshot.docChanges().forEach(change => {
-                if (change.type === 'added') {
-                    const tt = change.doc.data();
-                    const published = tt.publishedAt?.toDate() || new Date();
-                    
-                    // Ne pas notifier les emplois du temps trop vieux
-                    const oneWeekAgo = new Date();
-                    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-                    if (published < oneWeekAgo) return;
-                    
-                    const notifId = `timetable_${change.doc.id}`;
-                    
-                    if (this.shouldProcessNotification(notifId)) {
-                        console.log('📨 Nouvel emploi du temps détecté:', tt);
-                        
-                        const notif = {
-                            id: notifId,
-                            title: '⏰ Emploi du temps mis à jour',
-                            body: `Nouvel emploi du temps pour ${child.fullName} (${child.class})`,
-                            type: 'timetable',
-                            icon: 'fa-clock',
-                            data: { 
-                                page: 'timetable', 
-                                childId: child.matricule, 
-                                childName: child.fullName,
-                                className: child.class
-                            },
-                            timestamp: published.toISOString(),
-                            read: false
-                        };
-                        
-                        this.addNotification(notif);
-                    }
-                }
-            });
-        }, (error) => {
-            console.error('Erreur écoute emploi du temps:', error);
-        });
-        
-        this.listeners.push(unsubscribe);
-    },
-    
-    // Ajouter une notification (évite les doublons)
-    addNotification(notif) {
-        console.log('🔔 Ajout notification:', notif);
-        
-        // Vérifier si la notification existe déjà
-        const exists = notifications.some(n => n.id === notif.id);
-        if (exists) {
-            console.log('⏭️ Notification déjà dans la liste, ignorée');
+    loadNotifications() {
+        const raw = localStorage.getItem('notifications');
+        if (!raw) {
+            notifications = [];
             return;
         }
-        
-        // Marquer comme traitée
-        NotificationManager.markAsProcessed(notif.id);
-        
-        // Ajouter aux notifications
-        notifications.unshift(notif);
-        NotificationManager.saveNotifications();
-        
-        // Mettre à jour le compteur
-        const unreadCount = notifications.filter(n => !n.read).length;
-        updateNotificationCount(unreadCount);
-        
-        // Afficher la notification
-        showLocalNotification(notif.title, notif.body, notif.data);
-        
-        console.log('✅ Notification ajoutée:', notif.title);
+
+        notifications = JSON.parse(raw);
+
+        const expiry = Date.now() - this.expiryDays * 86400000;
+
+        notifications = notifications.filter(n =>
+            new Date(n.timestamp).getTime() > expiry
+        );
+
+        updateNotificationCount(
+            notifications.filter(n => !n.read).length
+        );
+    },
+
+    deleteNotification(id) {
+        notifications = notifications.filter(n => n.id !== id);
+        this.markProcessed(id);
+        this.saveNotifications();
+
+        updateNotificationCount(
+            notifications.filter(n => !n.read).length
+        );
+    },
+
+    // ========================
+    // AUTO CLEANUP
+    // ========================
+
+    startCleanup() {
+        setInterval(() => this.cleanup(), 3600000);
+    },
+
+    cleanup() {
+        const expiry = Date.now() - this.expiryDays * 86400000;
+
+        // nettoyer processed
+        this.processed.forEach((ts, id) => {
+            if (ts < expiry) this.processed.delete(id);
+        });
+
+        this.saveProcessed();
+
+        // nettoyer notifications
+        notifications = notifications.filter(n =>
+            new Date(n.timestamp).getTime() > expiry
+        );
+
+        this.saveNotifications();
     }
 };
 
+const RealTimeNotificationManager = {
+    listeners: [],
+    sessionIds: new Set(),
+    initializedListeners: new Set(),
+    groupedBuffer: {},
+
+    cleanup() {
+        this.listeners.forEach(u => u && u());
+        this.listeners = [];
+        this.sessionIds.clear();
+        this.initializedListeners.clear();
+    },
+
+    shouldProcess(id) {
+        if (this.sessionIds.has(id)) return false;
+        if (NotificationManager.isProcessed(id)) return false;
+
+        this.sessionIds.add(id);
+
+        setTimeout(() => {
+            this.sessionIds.delete(id);
+        }, 15000);
+
+        return true;
+    },
+
+    // ===================================
+    // ANTI-FIRST-SNAPSHOT FIRESTORE
+    // ===================================
+
+    handleSnapshot(snapshot, listenerKey, callback) {
+        if (!this.initializedListeners.has(listenerKey)) {
+            this.initializedListeners.add(listenerKey);
+            return; // ignore premier snapshot
+        }
+
+        snapshot.docChanges().forEach(change => {
+            if (change.type === 'added') {
+                callback(change);
+            }
+        });
+    },
+
+    // ===================================
+    // GROUPED NOTIFICATIONS (ANTI SPAM)
+    // ===================================
+
+    bufferGrouped(type, childName, messageBuilder) {
+        if (!this.groupedBuffer[type]) {
+            this.groupedBuffer[type] = [];
+        }
+
+        this.groupedBuffer[type].push(messageBuilder());
+
+        setTimeout(() => {
+            const messages = this.groupedBuffer[type];
+            if (!messages || messages.length === 0) return;
+
+            if (messages.length === 1) {
+                this.addNotification(messages[0]);
+            } else {
+                this.addNotification({
+                    id: `${type}_group_${Date.now()}`,
+                    title: `📢 ${messages.length} nouvelles notifications`,
+                    body: `${childName} a ${messages.length} nouvelles mises à jour`,
+                    type,
+                    timestamp: new Date().toISOString(),
+                    read: false
+                });
+            }
+
+            this.groupedBuffer[type] = [];
+        }, 2000);
+    },
+
+    addNotification(notif) {
+        if (notifications.some(n => n.id === notif.id)) return;
+
+        NotificationManager.markProcessed(notif.id);
+
+        notifications.unshift(notif);
+        NotificationManager.saveNotifications();
+
+        updateNotificationCount(
+            notifications.filter(n => !n.read).length
+        );
+
+        showLocalNotification(notif.title, notif.body, notif.data);
+    }
+};
 // ============================================
 // FONCTIONS UTILITAIRES
 // ============================================
