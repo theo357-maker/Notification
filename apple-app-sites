@@ -1,0 +1,17 @@
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appID": "TEAMID.com.cs-lacolombe.parent",
+        "paths": ["*"]
+      }
+    ]
+  },
+  "webcredentials": {
+    "apps": ["TEAMID.com.cs-lacolombe.parent"]
+  },
+  "activitycontinuation": {
+    "apps": ["TEAMID.com.cs-lacolombe.parent"]
+  }
+}

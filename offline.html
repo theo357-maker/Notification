@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hors ligne - Espace Parent CS la Colombe</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            padding: 1rem;
+        }
+        
+        .offline-container {
+            text-align: center;
+            padding: 2rem;
+            max-width: 500px;
+            width: 100%;
+            background: rgba(255,255,255,0.1);
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+        }
+        
+        .offline-icon {
+            font-size: 5rem;
+            margin-bottom: 1.5rem;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.1); opacity: 0.8; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+            font-weight: 600;
+        }
+        
+        p {
+            font-size: 1.1rem;
+            line-height: 1.6;
+            margin-bottom: 2rem;
+            opacity: 0.9;
+        }
+        
+        .button {
+            background: white;
+            color: #667eea;
+            border: none;
+            padding: 1rem 2rem;
+            border-radius: 50px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            margin: 0.5rem;
+        }
+        
+        .button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+        }
+        
+        .button.secondary {
+            background: transparent;
+            color: white;
+            border: 2px solid white;
+        }
+        
+        .button.secondary:hover {
+            background: rgba(255,255,255,0.1);
+        }
+        
+        .data-info {
+            margin-top: 2rem;
+            padding: 1.5rem;
+            background: rgba(255,255,255,0.15);
+            border-radius: 15px;
+            font-size: 0.95rem;
+            text-align: left;
+        }
+        
+        .data-info h3 {
+            margin-bottom: 1rem;
+            font-size: 1.1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            border-bottom: 1px solid rgba(255,255,255,0.2);
+            padding-bottom: 0.5rem;
+        }
+        
+        .data-info ul {
+            list-style: none;
+            padding: 0;
+        }
+        
+        .data-info li {
+            margin: 0.8rem 0;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .data-info li i {
+            width: 20px;
+            color: #ffd700;
+        }
+        
+        .retry {
+            margin-top: 1.5rem;
+            color: rgba(255,255,255,0.8);
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+        
+        .retry i {
+            animation: spin 2s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 4px;
+            background: rgba(255,255,255,0.2);
+            border-radius: 2px;
+            margin: 1rem 0;
+            overflow: hidden;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: #4caf50;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        
+        .last-sync {
+            font-size: 0.85rem;
+            color: rgba(255,255,255,0.7);
+            margin-top: 0.5rem;
+        }
+        
+        @media (max-width: 480px) {
+            .offline-container {
+                padding: 1.5rem;
+            }
+            
+            h1 {
+                font-size: 1.5rem;
+            }
+            
+            .button {
+                display: block;
+                width: 100%;
+                margin: 0.5rem 0;
+            }
+        }
+    </style>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="offline-container">
+        <div class="offline-icon">
+            <i class="fas fa-wifi-slash"></i>
+        </div>
+        <h1>Vous êtes hors ligne</h1>
+        <p>La connexion Internet a été perdue. Vous pouvez toujours consulter les données mises en cache.</p>
+        
+        <div style="display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center;">
+            <a href="/" class="button" onclick="checkConnection(event)">
+                <i class="fas fa-sync-alt"></i> Réessayer
+            </a>
+            <button class="button secondary" onclick="viewCachedData()">
+                <i class="fas fa-database"></i> Voir les données
+            </button>
+        </div>
+        
+        <div class="data-info" id="offlineData">
+            <h3>
+                <i class="fas fa-database"></i>
+                Données disponibles hors ligne
+            </h3>
+            <div class="progress-bar">
+                <div class="progress-fill" id="syncProgress" style="width: 0%;"></div>
+            </div>
+            <ul id="offline-data-list">
+                <li><i class="fas fa-spinner fa-spin"></i> Chargement des données...</li>
+            </ul>
+            <div class="last-sync" id="lastSync">
+                <i class="far fa-clock"></i> Dernière synchronisation: Inconnue
+            </div>
+        </div>
+        
+        <div class="retry" id="retry-message">
+            <i class="fas fa-circle-notch"></i> Tentative de reconnexion automatique...
+        </div>
+    </div>
+    
+    <script>
+        // Configuration
+        const CACHE_KEYS = {
+            PARENT: 'parentData',
+            CHILDREN: 'childrenList',
+            NOTIFICATIONS: 'notifications',
+            GRADES: 'cached_grades',
+            ATTENDANCE: 'cached_attendance',
+            SYNC_TIME: 'lastSyncTime'
+        };
+        
+        // Fonction pour vérifier la connexion
+        function checkConnection(e) {
+            e.preventDefault();
+            
+            if (navigator.onLine) {
+                window.location.href = '/';
+            } else {
+                showStatus('Toujours hors ligne. Vérifiez votre connexion.', 'error');
+            }
+        }
+        
+        // Afficher les données en cache
+        function viewCachedData() {
+            const listElement = document.getElementById('offline-data-list');
+            const syncProgress = document.getElementById('syncProgress');
+            
+            if (!listElement) return;
+            
+            // Récupérer les données du localStorage
+            const parentData = localStorage.getItem(CACHE_KEYS.PARENT);
+            const childrenData = localStorage.getItem(CACHE_KEYS.CHILDREN);
+            const notifications = localStorage.getItem(CACHE_KEYS.NOTIFICATIONS);
+            const grades = localStorage.getItem(CACHE_KEYS.GRADES);
+            const attendance = localStorage.getItem(CACHE_KEYS.ATTENDANCE);
+            const lastSync = localStorage.getItem(CACHE_KEYS.SYNC_TIME);
+            
+            let items = [];
+            let totalItems = 0;
+            let loadedItems = 0;
+            
+            // Compter les éléments chargés
+            if (parentData) {
+                try {
+                    const data = JSON.parse(parentData);
+                    items.push({
+                        icon: '👤',
+                        text: `${data.fullName || 'Parent'} (Connecté)`,
+                        type: 'parent'
+                    });
+                    loadedItems++;
+                } catch (e) {}
+            }
+            totalItems++;
+            
+            if (childrenData) {
+                try {
+                    const children = JSON.parse(childrenData);
+                    items.push({
+                        icon: '👥',
+                        text: `${children.length} enfant(s) enregistré(s)`,
+                        type: 'children'
+                    });
+                    loadedItems++;
+                } catch (e) {}
+            }
+            totalItems++;
+            
+            if (notifications) {
+                try {
+                    const notifs = JSON.parse(notifications);
+                    const unread = notifs.filter(n => !n.read).length;
+                    items.push({
+                        icon: '🔔',
+                        text: `${notifs.length} notification(s) (${unread} non lue(s))`,
+                        type: 'notifications'
+                    });
+                    loadedItems++;
+                } catch (e) {}
+            }
+            totalItems++;
+            
+            if (grades) {
+                try {
+                    const gradesData = JSON.parse(grades);
+                    items.push({
+                        icon: '📊',
+                        text: `${Object.keys(gradesData).length} période(s) de notes`,
+                        type: 'grades'
+                    });
+                    loadedItems++;
+                } catch (e) {}
+            }
+            totalItems++;
+            
+            if (attendance) {
+                try {
+                    const attData = JSON.parse(attendance);
+                    items.push({
+                        icon: '📅',
+                        text: `Présences de ${Object.keys(attData).length} mois`,
+                        type: 'attendance'
+                    });
+                    loadedItems++;
+                } catch (e) {}
+            }
+            totalItems++;
+            
+            // Mettre à jour la barre de progression
+            const progress = (loadedItems / totalItems) * 100;
+            syncProgress.style.width = `${progress}%`;
+            
+            // Afficher la liste
+            if (items.length === 0) {
+                listElement.innerHTML = `
+                    <li><i class="fas fa-folder-open"></i> Aucune donnée en cache</li>
+                    <li><i class="fas fa-cloud-upload-alt"></i> Connectez-vous pour charger les données</li>
+                `;
+            } else {
+                listElement.innerHTML = items.map(item => 
+                    `<li><i class="fas fa-check-circle" style="color: #4caf50;"></i> ${item.icon} ${item.text}</li>`
+                ).join('');
+            }
+            
+            // Afficher la dernière synchronisation
+            if (lastSync) {
+                const date = new Date(parseInt(lastSync));
+                document.getElementById('lastSync').innerHTML = 
+                    `<i class="far fa-clock"></i> Dernière synchronisation: ${date.toLocaleString('fr-FR')}`;
+            }
+            
+            // Sauvegarder dans sessionStorage pour la page principale
+            sessionStorage.setItem('offline_data_viewed', 'true');
+        }
+        
+        // Afficher un message de statut
+        function showStatus(message, type = 'info') {
+            const retryMsg = document.getElementById('retry-message');
+            retryMsg.innerHTML = `<i class="fas fa-${type === 'error' ? 'exclamation-circle' : 'info-circle'}"></i> ${message}`;
+            
+            if (type === 'error') {
+                retryMsg.style.color = '#ff6b6b';
+            } else {
+                retryMsg.style.color = 'rgba(255,255,255,0.8)';
+            }
+        }
+        
+        // Tentative de reconnexion automatique
+        let retryCount = 0;
+        const maxRetries = 10;
+        let reconnectInterval;
+        
+        function attemptReconnect() {
+            if (navigator.onLine) {
+                clearInterval(reconnectInterval);
+                showStatus('✅ Connexion rétablie! Redirection...', 'success');
+                setTimeout(() => window.location.reload(), 1500);
+            } else if (retryCount < maxRetries) {
+                retryCount++;
+                showStatus(`Tentative ${retryCount}/${maxRetries}...`);
+            } else {
+                clearInterval(reconnectInterval);
+                showStatus('❌ Impossible de se reconnecter. Vérifiez votre connexion.', 'error');
+                
+                document.getElementById('retry-message').innerHTML = `
+                    <i class="fas fa-exclamation-triangle"></i> 
+                    Vérifiez votre connexion Internet
+                    <button onclick="location.reload()" style="background: none; border: 1px solid white; color: white; padding: 5px 10px; border-radius: 5px; margin-left: 10px; cursor: pointer;">
+                        <i class="fas fa-redo"></i> Réessayer
+                    </button>
+                `;
+            }
+        }
+        
+        // Fonction pour synchroniser les données en cache
+        async function syncCachedData() {
+            if (!navigator.onLine) return;
+            
+            try {
+                // Récupérer les données à synchroniser depuis IndexedDB si disponible
+                if ('serviceWorker' in navigator && 'SyncManager' in window) {
+                    const registration = await navigator.serviceWorker.ready;
+                    await registration.sync.register('sync-offline-data');
+                    console.log('📤 Synchronisation programmée');
+                }
+            } catch (error) {
+                console.error('Erreur synchronisation:', error);
+            }
+        }
+        
+        // Vérifier si on vient de la page principale
+        const offlineDataViewed = sessionStorage.getItem('offline_data_viewed');
+        if (!offlineDataViewed) {
+            // Afficher les données automatiquement après 1 seconde
+            setTimeout(viewCachedData, 1000);
+        }
+        
+        // Initialisation
+        viewCachedData();
+        
+        // Écouter les changements de connectivité
+        window.addEventListener('online', () => {
+            showStatus('📶 Connecté! Synchronisation...', 'success');
+            syncCachedData();
+            setTimeout(() => window.location.reload(), 2000);
+        });
+        
+        window.addEventListener('offline', () => {
+            showStatus('📴 Mode hors ligne activé', 'info');
+        });
+        
+        // Lancer les tentatives de reconnexion
+        reconnectInterval = setInterval(attemptReconnect, 3000);
+        
+        // Écouter les messages du Service Worker
+        if (navigator.serviceWorker) {
+            navigator.serviceWorker.addEventListener('message', (event) => {
+                if (event.data.type === 'SYNC_COMPLETE') {
+                    viewCachedData(); // Mettre à jour l'affichage
+                    showStatus('✅ Synchronisation terminée', 'success');
+                }
+            });
+        }
+        
+        // Fonction pour effacer le cache (option de débogage)
+        window.clearCache = function() {
+            if (confirm('Effacer toutes les données en cache ?')) {
+                Object.values(CACHE_KEYS).forEach(key => {
+                    localStorage.removeItem(key);
+                });
+                sessionStorage.clear();
+                viewCachedData();
+                showStatus('🧹 Cache effacé', 'info');
+            }
+        };
+    </script>
+</body>
+</html>

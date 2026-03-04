@@ -1,0 +1,19 @@
+{
+  "version": "2.1.0",
+  "build": 20240315,
+  "mandatory": false,
+  "releaseNotes": [
+    "Correction des doublons de notifications",
+    "Ajout de la session persistante avec biométrie",
+    "Notifications pour tous les types (présences, devoirs, paiements)",
+    "Suppression définitive des notifications",
+    "Amélioration des performances hors ligne"
+  ],
+  "updateUrl": "/index.html",
+  "features": {
+    "biometric": true,
+    "offline": true,
+    "pushNotifications": true,
+    "realTimeSync": true
+  }
+}
