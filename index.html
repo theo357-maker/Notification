@@ -3075,36 +3075,47 @@ function showLocalNotification(title, body, data = {}) {
     }
 }
 
-// ============================================
-// GESTION DE SESSION ET AUTHENTIFICATION
-// ============================================
-
-// Vérifier la session au démarrage
+// Modifier la fonction checkExistingSession
 async function checkExistingSession() {
-    if (SessionManager.hasActiveSession()) {
-        const session = SessionManager.getSession();
+    const hasSession = await EnhancedSessionManager.hasActiveSession();
+    
+    if (hasSession) {
+        const session = EnhancedSessionManager.getSession();
         if (session && session.matricule) {
             try {
-                // Essayer de récupérer les données du parent
-                const parentDoc = await getDoc(doc(db, 'parents', session.matricule));
-                if (parentDoc.exists()) {
-                    const parentData = parentDoc.data();
-                    
-                    // Vérifier si l'utilisateur est déjà connecté via Firebase Auth
-                    if (auth.currentUser) {
-                        currentParent = { id: parentDoc.id, ...parentData };
-                        await initializeAppAfterLogin();
-                        return true;
-                    } else {
-                        // Session expirée côté Firebase
-                        SessionManager.clearSession();
+                // Essayer d'abord le cache
+                let parentData = await dataCache.getCachedParent(session.matricule);
+                
+                // Si pas en cache, essayer Firestore
+                if (!parentData && navigator.onLine) {
+                    const parentDoc = await getDoc(doc(db, 'parents', session.matricule));
+                    if (parentDoc.exists()) {
+                        parentData = { id: parentDoc.id, ...parentDoc.data() };
+                        await dataCache.cacheParentData(parentData);
                     }
+                }
+                
+                if (parentData) {
+                    currentParent = parentData;
+                    await initializeAppAfterLogin();
+                    return true;
                 } else {
-                    SessionManager.clearSession();
+                    EnhancedSessionManager.clearSession();
                 }
             } catch (error) {
                 console.error('Erreur vérification session:', error);
-                SessionManager.clearSession();
+                // En cas d'erreur, on garde la session si elle est récente
+                const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+                if (Date.now() - session.timestamp < thirtyDays) {
+                    // Essayer de charger depuis le cache uniquement
+                    const cached = await dataCache.getCachedParent(session.matricule);
+                    if (cached) {
+                        currentParent = cached;
+                        await initializeAppAfterLogin();
+                        return true;
+                    }
+                }
+                EnhancedSessionManager.clearSession();
             }
         }
     }
@@ -5930,6 +5941,1393 @@ document.addEventListener('DOMContentLoaded', () => {
         monthSelect.value = new Date().getMonth();
     }
 });
+
+// ============================================
+// DATA CACHE MANAGER - Gestionnaire de cache local
+// ============================================
+class DataCacheManager {
+    constructor() {
+        this.dbName = 'CSParentDataCache';
+        this.dbVersion = 2;
+        this.db = null;
+        this.cacheExpiryHours = 72; // 3 jours de cache
+        this.init();
+    }
+    
+    async init() {
+        await this.openDB();
+        await this.cleanExpiredCache();
+    }
+    
+    openDB() {
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open(this.dbName, this.dbVersion);
+            
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => {
+                this.db = request.result;
+                resolve(this.db);
+            };
+            
+            request.onupgradeneeded = (event) => {
+                const db = event.target.result;
+                
+                // Store pour les données parent
+                if (!db.objectStoreNames.contains('parent')) {
+                    const parentStore = db.createObjectStore('parent', { keyPath: 'id' });
+                    parentStore.createIndex('matricule', 'matricule', { unique: true });
+                    parentStore.createIndex('cachedAt', 'cachedAt');
+                }
+                
+                // Store pour les enfants
+                if (!db.objectStoreNames.contains('children')) {
+                    const childrenStore = db.createObjectStore('children', { keyPath: 'matricule' });
+                    childrenStore.createIndex('parentId', 'parentId');
+                    childrenStore.createIndex('cachedAt', 'cachedAt');
+                }
+                
+                // Store pour les notes
+                if (!db.objectStoreNames.contains('grades')) {
+                    const gradesStore = db.createObjectStore('grades', { keyPath: 'id' });
+                    gradesStore.createIndex('studentId', 'studentId');
+                    gradesStore.createIndex('period', 'period');
+                    gradesStore.createIndex('cachedAt', 'cachedAt');
+                }
+                
+                // Store pour les présences
+                if (!db.objectStoreNames.contains('attendance')) {
+                    const attendanceStore = db.createObjectStore('attendance', { keyPath: 'id' });
+                    attendanceStore.createIndex('studentId', 'studentId');
+                    attendanceStore.createIndex('date', 'date');
+                    attendanceStore.createIndex('cachedAt', 'cachedAt');
+                }
+                
+                // Store pour les incidents
+                if (!db.objectStoreNames.contains('incidents')) {
+                    const incidentsStore = db.createObjectStore('incidents', { keyPath: 'id' });
+                    incidentsStore.createIndex('studentId', 'studentId');
+                    incidentsStore.createIndex('cachedAt', 'cachedAt');
+                }
+                
+                // Store pour les communiqués
+                if (!db.objectStoreNames.contains('communiques')) {
+                    const communiquesStore = db.createObjectStore('communiques', { keyPath: 'id' });
+                    communiquesStore.createIndex('parentId', 'parentId');
+                    communiquesStore.createIndex('cachedAt', 'cachedAt');
+                }
+                
+                // Store pour les devoirs
+                if (!db.objectStoreNames.contains('homework')) {
+                    const homeworkStore = db.createObjectStore('homework', { keyPath: 'id' });
+                    homeworkStore.createIndex('class', 'class');
+                    homeworkStore.createIndex('cachedAt', 'cachedAt');
+                }
+                
+                // Store pour l'emploi du temps
+                if (!db.objectStoreNames.contains('timetable')) {
+                    const timetableStore = db.createObjectStore('timetable', { keyPath: 'id' });
+                    timetableStore.createIndex('class', 'class');
+                    timetableStore.createIndex('cachedAt', 'cachedAt');
+                }
+                
+                // Store pour les paiements
+                if (!db.objectStoreNames.contains('payments')) {
+                    const paymentsStore = db.createObjectStore('payments', { keyPath: 'id' });
+                    paymentsStore.createIndex('studentId', 'studentId');
+                    paymentsStore.createIndex('cachedAt', 'cachedAt');
+                }
+                
+                // Store pour les métadonnées de cache
+                if (!db.objectStoreNames.contains('cache_metadata')) {
+                    const metadataStore = db.createObjectStore('cache_metadata', { keyPath: 'key' });
+                    metadataStore.createIndex('expiresAt', 'expiresAt');
+                }
+            };
+        });
+    }
+    
+    // Sauvegarder les données parent
+    async cacheParentData(parentData) {
+        if (!this.db) await this.init();
+        
+        const data = {
+            ...parentData,
+            cachedAt: Date.now(),
+            expiresAt: Date.now() + (this.cacheExpiryHours * 60 * 60 * 1000)
+        };
+        
+        const transaction = this.db.transaction(['parent'], 'readwrite');
+        const store = transaction.objectStore('parent');
+        await store.put(data);
+        
+        // Sauvegarder les métadonnées
+        await this.saveCacheMetadata('parent', data.cachedAt, data.expiresAt);
+        
+        console.log('✅ Données parent mises en cache');
+    }
+    
+    // Récupérer les données parent
+    async getCachedParent(matricule) {
+        if (!this.db) await this.init();
+        
+        const transaction = this.db.transaction(['parent'], 'readonly');
+        const store = transaction.objectStore('parent');
+        const index = store.index('matricule');
+        
+        return new Promise((resolve) => {
+            const request = index.get(matricule);
+            request.onsuccess = () => {
+                const data = request.result;
+                if (data && data.expiresAt > Date.now()) {
+                    resolve(data);
+                } else {
+                    resolve(null);
+                }
+            };
+            request.onerror = () => resolve(null);
+        });
+    }
+    
+    // Sauvegarder les enfants
+    async cacheChildren(children, parentId) {
+        if (!this.db) await this.init();
+        
+        const transaction = this.db.transaction(['children'], 'readwrite');
+        const store = transaction.objectStore('children');
+        
+        for (const child of children) {
+            const data = {
+                ...child,
+                parentId,
+                cachedAt: Date.now(),
+                expiresAt: Date.now() + (this.cacheExpiryHours * 60 * 60 * 1000)
+            };
+            await store.put(data);
+        }
+        
+        console.log(`✅ ${children.length} enfant(s) mis en cache`);
+    }
+    
+    // Récupérer les enfants d'un parent
+    async getCachedChildren(parentId) {
+        if (!this.db) await this.init();
+        
+        const transaction = this.db.transaction(['children'], 'readonly');
+        const store = transaction.objectStore('children');
+        const index = store.index('parentId');
+        
+        return new Promise((resolve) => {
+            const request = index.getAll(parentId);
+            request.onsuccess = () => {
+                const children = request.result;
+                const validChildren = children.filter(c => c.expiresAt > Date.now());
+                resolve(validChildren);
+            };
+            request.onerror = () => resolve([]);
+        });
+    }
+    
+    // Sauvegarder les données d'une collection
+    async cacheCollection(collectionName, items, keyField = 'id', studentId = null, classId = null) {
+        if (!this.db) await this.init();
+        
+        if (!this.db.objectStoreNames.contains(collectionName)) {
+            console.warn(`Store ${collectionName} n'existe pas`);
+            return;
+        }
+        
+        const transaction = this.db.transaction([collectionName], 'readwrite');
+        const store = transaction.objectStore(collectionName);
+        
+        for (const item of items) {
+            const data = {
+                ...item,
+                cachedAt: Date.now(),
+                expiresAt: Date.now() + (this.cacheExpiryHours * 60 * 60 * 1000)
+            };
+            
+            if (studentId) data.studentId = studentId;
+            if (classId) data.classId = classId;
+            
+            await store.put(data);
+        }
+        
+        await this.saveCacheMetadata(collectionName, Date.now(), Date.now() + (this.cacheExpiryHours * 60 * 60 * 1000));
+        console.log(`✅ ${items.length} items mis en cache dans ${collectionName}`);
+    }
+    
+    // Récupérer les données d'une collection
+    async getCachedCollection(collectionName, filterField = null, filterValue = null) {
+        if (!this.db) await this.init();
+        
+        if (!this.db.objectStoreNames.contains(collectionName)) {
+            return [];
+        }
+        
+        const transaction = this.db.transaction([collectionName], 'readonly');
+        const store = transaction.objectStore(collectionName);
+        
+        return new Promise((resolve) => {
+            let request;
+            
+            if (filterField && filterValue) {
+                const index = store.index(filterField);
+                request = index.getAll(filterValue);
+            } else {
+                request = store.getAll();
+            }
+            
+            request.onsuccess = () => {
+                const items = request.result || [];
+                const validItems = items.filter(item => item.expiresAt > Date.now());
+                resolve(validItems);
+            };
+            request.onerror = () => resolve([]);
+        });
+    }
+    
+    // Sauvegarder les métadonnées de cache
+    async saveCacheMetadata(key, cachedAt, expiresAt) {
+        const transaction = this.db.transaction(['cache_metadata'], 'readwrite');
+        const store = transaction.objectStore('cache_metadata');
+        
+        await store.put({
+            key,
+            cachedAt,
+            expiresAt,
+            lastAccessed: Date.now()
+        });
+    }
+    
+    // Vérifier si le cache est valide
+    async isCacheValid(key) {
+        if (!this.db) await this.init();
+        
+        const transaction = this.db.transaction(['cache_metadata'], 'readonly');
+        const store = transaction.objectStore('cache_metadata');
+        
+        return new Promise((resolve) => {
+            const request = store.get(key);
+            request.onsuccess = () => {
+                const metadata = request.result;
+                if (metadata && metadata.expiresAt > Date.now()) {
+                    resolve(true);
+                } else {
+                    resolve(false);
+                }
+            };
+            request.onerror = () => resolve(false);
+        });
+    }
+    
+    // Nettoyer le cache expiré
+    async cleanExpiredCache() {
+        if (!this.db) await this.init();
+        
+        const stores = ['parent', 'children', 'grades', 'attendance', 'incidents', 
+                        'communiques', 'homework', 'timetable', 'payments'];
+        
+        for (const storeName of stores) {
+            if (!this.db.objectStoreNames.contains(storeName)) continue;
+            
+            const transaction = this.db.transaction([storeName], 'readwrite');
+            const store = transaction.objectStore(storeName);
+            
+            const request = store.getAll();
+            request.onsuccess = () => {
+                const items = request.result || [];
+                for (const item of items) {
+                    if (item.expiresAt && item.expiresAt < Date.now()) {
+                        store.delete(item[storeName === 'parent' ? 'id' : 
+                                       storeName === 'children' ? 'matricule' : 'id']);
+                    }
+                }
+            };
+        }
+        
+        // Nettoyer les métadonnées expirées
+        const metadataTx = this.db.transaction(['cache_metadata'], 'readwrite');
+        const metadataStore = metadataTx.objectStore('cache_metadata');
+        const metadataRequest = metadataStore.getAll();
+        
+        metadataRequest.onsuccess = () => {
+            const metadata = metadataRequest.result || [];
+            for (const item of metadata) {
+                if (item.expiresAt < Date.now()) {
+                    metadataStore.delete(item.key);
+                }
+            }
+        };
+        
+        console.log('🧹 Cache expiré nettoyé');
+    }
+}
+
+// ============================================
+// DATA LOADER AVEC CACHE ET SYNC
+// ============================================
+class DataLoaderWithCache {
+    constructor(cacheManager) {
+        this.cache = cacheManager;
+        this.pendingSyncs = new Map();
+        this.isOnline = navigator.onLine;
+        
+        // Écouter les changements de connectivité
+        window.addEventListener('online', () => this.handleOnline());
+        window.addEventListener('offline', () => this.handleOffline());
+    }
+    
+    handleOnline() {
+        console.log('📶 Connexion rétablie - Synchronisation en cours');
+        this.isOnline = true;
+        this.syncPendingData();
+        showToast('Connexion rétablie, synchronisation en cours...', 'success');
+    }
+    
+    handleOffline() {
+        console.log('📴 Mode hors ligne - Utilisation du cache');
+        this.isOnline = false;
+        showToast('Mode hors ligne - Données en cache', 'warning');
+    }
+    
+    // Charger les données parent avec cache
+    async loadParentData(matricule, forceRefresh = false) {
+        if (this.isOnline && !forceRefresh) {
+            // Vérifier si le cache est valide
+            const isValid = await this.cache.isCacheValid('parent');
+            if (isValid) {
+                const cached = await this.cache.getCachedParent(matricule);
+                if (cached) return cached;
+            }
+        }
+        
+        // Charger depuis Firestore
+        try {
+            const parentDoc = await getDoc(doc(db, 'parents', matricule));
+            if (parentDoc.exists()) {
+                const data = { id: parentDoc.id, ...parentDoc.data() };
+                await this.cache.cacheParentData(data);
+                return data;
+            }
+        } catch (error) {
+            console.warn('Erreur chargement parent, tentative cache:', error);
+            const cached = await this.cache.getCachedParent(matricule);
+            if (cached) return cached;
+            throw error;
+        }
+    }
+    
+    // Charger les enfants avec cache
+    async loadChildren(parentId, forceRefresh = false) {
+        if (this.isOnline && !forceRefresh) {
+            const isValid = await this.cache.isCacheValid('children');
+            if (isValid) {
+                const cached = await this.cache.getCachedChildren(parentId);
+                if (cached && cached.length > 0) return cached;
+            }
+        }
+        
+        try {
+            // Récupérer depuis la liste des enfants du parent
+            const parentData = await this.loadParentData(parentId);
+            const children = [];
+            
+            for (const childRef of (parentData.children || [])) {
+                const matricule = childRef.matricule || childRef;
+                const type = childRef.type || 'secondary';
+                const collectionName = type === 'secondary' ? 'students' :
+                                      type === 'primary' ? 'primary_students' : 'kindergarten_students';
+                
+                const childDoc = await getDoc(doc(db, collectionName, matricule));
+                if (childDoc.exists()) {
+                    children.push({
+                        matricule,
+                        type,
+                        ...childDoc.data()
+                    });
+                }
+            }
+            
+            await this.cache.cacheChildren(children, parentId);
+            return children;
+            
+        } catch (error) {
+            console.warn('Erreur chargement enfants, tentative cache:', error);
+            return await this.cache.getCachedChildren(parentId);
+        }
+    }
+    
+    // Charger les notes avec cache
+    async loadGrades(studentId, className, period, forceRefresh = false) {
+        const cacheKey = `grades_${studentId}_${period}`;
+        
+        if (this.isOnline && !forceRefresh) {
+            const isValid = await this.cache.isCacheValid(cacheKey);
+            if (isValid) {
+                const cached = await this.cache.getCachedCollection('grades', 'studentId', studentId);
+                const periodCached = cached.filter(g => g.period === period);
+                if (periodCached.length > 0) return periodCached;
+            }
+        }
+        
+        try {
+            const q = query(
+                collection(db, 'parent_grades'),
+                where('className', '==', className),
+                where('period', '==', period)
+            );
+            
+            const snap = await getDocs(q);
+            const grades = [];
+            
+            snap.forEach(doc => {
+                const data = doc.data();
+                const studentGrade = data.grades?.find(g => g.studentMatricule === studentId);
+                if (studentGrade) {
+                    grades.push({
+                        id: doc.id,
+                        ...data,
+                        studentGrade,
+                        period
+                    });
+                }
+            });
+            
+            await this.cache.cacheCollection('grades', grades, 'id', studentId);
+            await this.cache.saveCacheMetadata(cacheKey, Date.now(), Date.now() + (72 * 60 * 60 * 1000));
+            
+            return grades;
+            
+        } catch (error) {
+            console.warn('Erreur chargement notes, tentative cache:', error);
+            const cached = await this.cache.getCachedCollection('grades', 'studentId', studentId);
+            return cached.filter(g => g.period === period);
+        }
+    }
+    
+    // Charger les présences avec cache
+    async loadAttendance(studentId, month, year, forceRefresh = false) {
+        const cacheKey = `attendance_${studentId}_${year}_${month}`;
+        
+        if (this.isOnline && !forceRefresh) {
+            const isValid = await this.cache.isCacheValid(cacheKey);
+            if (isValid) {
+                const cached = await this.cache.getCachedCollection('attendance', 'studentId', studentId);
+                return cached;
+            }
+        }
+        
+        try {
+            const startDate = `${year}-${(month + 1).toString().padStart(2, '0')}-01`;
+            const endDate = `${year}-${(month + 1).toString().padStart(2, '0')}-31`;
+            
+            const q = query(
+                collection(db, 'student_attendance'),
+                where('studentId', '==', studentId),
+                where('date', '>=', startDate),
+                where('date', '<=', endDate),
+                where('published', '==', true)
+            );
+            
+            const snap = await getDocs(q);
+            const attendance = [];
+            
+            snap.forEach(doc => {
+                attendance.push({ id: doc.id, ...doc.data() });
+            });
+            
+            await this.cache.cacheCollection('attendance', attendance, 'id', studentId);
+            await this.cache.saveCacheMetadata(cacheKey, Date.now(), Date.now() + (72 * 60 * 60 * 1000));
+            
+            return attendance;
+            
+        } catch (error) {
+            console.warn('Erreur chargement présences, tentative cache:', error);
+            return await this.cache.getCachedCollection('attendance', 'studentId', studentId);
+        }
+    }
+    
+    // Charger les incidents avec cache
+    async loadIncidents(studentId, forceRefresh = false) {
+        const cacheKey = `incidents_${studentId}`;
+        
+        if (this.isOnline && !forceRefresh) {
+            const isValid = await this.cache.isCacheValid(cacheKey);
+            if (isValid) {
+                const cached = await this.cache.getCachedCollection('incidents', 'studentId', studentId);
+                if (cached.length > 0) return cached;
+            }
+        }
+        
+        try {
+            const q = query(
+                collection(db, 'incidents'),
+                where('studentMatricule', '==', studentId),
+                orderBy('createdAt', 'desc')
+            );
+            
+            const snap = await getDocs(q);
+            const incidents = [];
+            
+            snap.forEach(doc => {
+                incidents.push({ id: doc.id, ...doc.data() });
+            });
+            
+            await this.cache.cacheCollection('incidents', incidents, 'id', studentId);
+            await this.cache.saveCacheMetadata(cacheKey, Date.now(), Date.now() + (72 * 60 * 60 * 1000));
+            
+            return incidents;
+            
+        } catch (error) {
+            console.warn('Erreur chargement incidents, tentative cache:', error);
+            return await this.cache.getCachedCollection('incidents', 'studentId', studentId);
+        }
+    }
+    
+    // Charger les communiqués avec cache
+    async loadCommuniques(parentId, studentId = null, forceRefresh = false) {
+        const cacheKey = `communiques_${parentId}_${studentId || 'all'}`;
+        
+        if (this.isOnline && !forceRefresh) {
+            const isValid = await this.cache.isCacheValid(cacheKey);
+            if (isValid) {
+                let cached = await this.cache.getCachedCollection('communiques', 'parentId', parentId);
+                if (studentId) {
+                    cached = cached.filter(c => c.studentIds?.includes(studentId));
+                }
+                if (cached.length > 0) return cached;
+            }
+        }
+        
+        try {
+            const q = query(
+                collection(db, 'parent_communique_relations'),
+                where('parentId', '==', parentId),
+                orderBy('createdAt', 'desc')
+            );
+            
+            const snap = await getDocs(q);
+            const communiques = [];
+            
+            for (const relDoc of snap.docs) {
+                const rel = relDoc.data();
+                const comDoc = await getDoc(doc(db, 'parent_communiques', rel.communiqueId));
+                if (comDoc.exists()) {
+                    communiques.push({
+                        id: comDoc.id,
+                        ...comDoc.data(),
+                        relation: rel
+                    });
+                }
+            }
+            
+            await this.cache.cacheCollection('communiques', communiques, 'id', parentId);
+            await this.cache.saveCacheMetadata(cacheKey, Date.now(), Date.now() + (72 * 60 * 60 * 1000));
+            
+            return communiques;
+            
+        } catch (error) {
+            console.warn('Erreur chargement communiqués, tentative cache:', error);
+            let cached = await this.cache.getCachedCollection('communiques', 'parentId', parentId);
+            if (studentId) {
+                cached = cached.filter(c => c.studentIds?.includes(studentId));
+            }
+            return cached;
+        }
+    }
+    
+    // Charger les devoirs avec cache
+    async loadHomework(className, forceRefresh = false) {
+        const cacheKey = `homework_${className}`;
+        
+        if (this.isOnline && !forceRefresh) {
+            const isValid = await this.cache.isCacheValid(cacheKey);
+            if (isValid) {
+                const cached = await this.cache.getCachedCollection('homework', 'class', className);
+                if (cached.length > 0) return cached;
+            }
+        }
+        
+        try {
+            const q = query(
+                collection(db, 'homework'),
+                where('className', '==', className),
+                orderBy('dueDate', 'desc')
+            );
+            
+            const snap = await getDocs(q);
+            const homework = [];
+            
+            snap.forEach(doc => {
+                homework.push({ id: doc.id, ...doc.data() });
+            });
+            
+            await this.cache.cacheCollection('homework', homework, 'id', null, className);
+            await this.cache.saveCacheMetadata(cacheKey, Date.now(), Date.now() + (72 * 60 * 60 * 1000));
+            
+            return homework;
+            
+        } catch (error) {
+            console.warn('Erreur chargement devoirs, tentative cache:', error);
+            return await this.cache.getCachedCollection('homework', 'class', className);
+        }
+    }
+    
+    // Charger l'emploi du temps avec cache
+    async loadTimetable(className, forceRefresh = false) {
+        const cacheKey = `timetable_${className}`;
+        
+        if (this.isOnline && !forceRefresh) {
+            const isValid = await this.cache.isCacheValid(cacheKey);
+            if (isValid) {
+                const cached = await this.cache.getCachedCollection('timetable', 'class', className);
+                if (cached.length > 0) return cached;
+            }
+        }
+        
+        try {
+            const q = query(
+                collection(db, 'class_schedules'),
+                where('className', '==', className),
+                orderBy('publishedAt', 'desc')
+            );
+            
+            const snap = await getDocs(q);
+            const schedules = [];
+            
+            snap.forEach(doc => {
+                schedules.push({ id: doc.id, ...doc.data() });
+            });
+            
+            await this.cache.cacheCollection('timetable', schedules, 'id', null, className);
+            await this.cache.saveCacheMetadata(cacheKey, Date.now(), Date.now() + (72 * 60 * 60 * 1000));
+            
+            return schedules;
+            
+        } catch (error) {
+            console.warn('Erreur chargement emploi du temps, tentative cache:', error);
+            return await this.cache.getCachedCollection('timetable', 'class', className);
+        }
+    }
+    
+    // Synchroniser les données en attente
+    async syncPendingData() {
+        if (!this.isOnline) return;
+        
+        console.log('🔄 Synchronisation des données en attente...');
+        
+        // Récupérer les actions en attente
+        const pendingActions = await this.getPendingActions();
+        
+        for (const action of pendingActions) {
+            try {
+                await this.executePendingAction(action);
+                await this.markActionSynced(action.id);
+                console.log(`✅ Action ${action.id} synchronisée`);
+            } catch (error) {
+                console.error(`❌ Échec synchronisation action ${action.id}:`, error);
+            }
+        }
+    }
+    
+    async getPendingActions() {
+        // Implémenter la récupération des actions en attente
+        return [];
+    }
+    
+    async executePendingAction(action) {
+        // Implémenter l'exécution des actions
+        return Promise.resolve();
+    }
+    
+    async markActionSynced(actionId) {
+        // Implémenter le marquage des actions synchronisées
+        return Promise.resolve();
+    }
+    
+    // Précharger toutes les données d'un enfant
+    async preloadChildData(child, forceRefresh = false) {
+        const promises = [];
+        
+        // Notes
+        if (child.type === 'secondary') {
+            const periods = ['P1', 'P2', 'EXAM_S1', 'P3', 'P4', 'EXAM_S2'];
+            for (const period of periods) {
+                promises.push(this.loadGrades(child.matricule, child.class, period, forceRefresh));
+            }
+        } else if (child.type === 'primary') {
+            const periods = ['1ère P', '2ème P', 'Examen S1', '3ème P', '4ème P', 'Examen S2'];
+            for (const period of periods) {
+                promises.push(this.loadPrimaryGrades(child.matricule, period, forceRefresh));
+            }
+        }
+        
+        // Présences (3 derniers mois)
+        const now = new Date();
+        for (let i = 0; i < 3; i++) {
+            const month = (now.getMonth() - i + 12) % 12;
+            const year = now.getFullYear() - (now.getMonth() - i < 0 ? 1 : 0);
+            promises.push(this.loadAttendance(child.matricule, month, year, forceRefresh));
+        }
+        
+        // Incidents
+        promises.push(this.loadIncidents(child.matricule, forceRefresh));
+        
+        // Devoirs
+        promises.push(this.loadHomework(child.class, forceRefresh));
+        
+        // Emploi du temps
+        promises.push(this.loadTimetable(child.class, forceRefresh));
+        
+        await Promise.allSettled(promises);
+        console.log(`✅ Préchargement terminé pour ${child.fullName}`);
+    }
+    
+    async loadPrimaryGrades(studentId, period, forceRefresh = false) {
+        const cacheKey = `primary_grades_${studentId}_${period}`;
+        
+        if (this.isOnline && !forceRefresh) {
+            const isValid = await this.cache.isCacheValid(cacheKey);
+            if (isValid) {
+                const cached = await this.cache.getCachedCollection('grades', 'studentId', studentId);
+                const periodCached = cached.filter(g => g.period === period);
+                if (periodCached.length > 0) return periodCached;
+            }
+        }
+        
+        try {
+            const q = query(
+                collection(db, 'primary_published_grades'),
+                where('studentId', '==', studentId),
+                where('period', '==', period)
+            );
+            
+            const snap = await getDocs(q);
+            const grades = [];
+            
+            snap.forEach(doc => {
+                grades.push({ id: doc.id, ...doc.data() });
+            });
+            
+            await this.cache.cacheCollection('grades', grades, 'id', studentId);
+            await this.cache.saveCacheMetadata(cacheKey, Date.now(), Date.now() + (72 * 60 * 60 * 1000));
+            
+            return grades;
+            
+        } catch (error) {
+            console.warn('Erreur chargement notes primaire, tentative cache:', error);
+            const cached = await this.cache.getCachedCollection('grades', 'studentId', studentId);
+            return cached.filter(g => g.period === period);
+        }
+    }
+}
+
+// ============================================
+// AMÉLIORATION DE LA GESTION DE SESSION
+// ============================================
+
+// Étendre SessionManager avec persistance améliorée
+const EnhancedSessionManager = {
+    ...SessionManager,
+    
+    // Sauvegarder la session avec plus de données
+    saveSession(matricule, additionalData = {}) {
+        const session = {
+            matricule,
+            timestamp: Date.now(),
+            userAgent: navigator.userAgent,
+            language: navigator.language,
+            platform: navigator.platform,
+            lastActivity: Date.now(),
+            ...additionalData
+        };
+        localStorage.setItem('parent_session', JSON.stringify(session));
+        localStorage.setItem('last_login', Date.now().toString());
+        
+        // Sauvegarder aussi dans IndexedDB pour redondance
+        this.saveSessionToIndexedDB(session);
+    },
+    
+    // Sauvegarder session dans IndexedDB
+    async saveSessionToIndexedDB(session) {
+        try {
+            const request = indexedDB.open('CSParentSession', 1);
+            request.onupgradeneeded = (event) => {
+                const db = event.target.result;
+                if (!db.objectStoreNames.contains('sessions')) {
+                    db.createObjectStore('sessions', { keyPath: 'matricule' });
+                }
+            };
+            request.onsuccess = (event) => {
+                const db = event.target.result;
+                const tx = db.transaction('sessions', 'readwrite');
+                const store = tx.objectStore('sessions');
+                store.put(session);
+                tx.oncomplete = () => db.close();
+            };
+        } catch (error) {
+            console.warn('Erreur sauvegarde session IndexedDB:', error);
+        }
+    },
+    
+    // Récupérer session depuis IndexedDB
+    async getSessionFromIndexedDB(matricule) {
+        return new Promise((resolve) => {
+            const request = indexedDB.open('CSParentSession', 1);
+            request.onsuccess = (event) => {
+                const db = event.target.result;
+                if (!db.objectStoreNames.contains('sessions')) {
+                    db.close();
+                    resolve(null);
+                    return;
+                }
+                const tx = db.transaction('sessions', 'readonly');
+                const store = tx.objectStore('sessions');
+                const getRequest = store.get(matricule);
+                getRequest.onsuccess = () => {
+                    db.close();
+                    resolve(getRequest.result);
+                };
+                getRequest.onerror = () => {
+                    db.close();
+                    resolve(null);
+                };
+            };
+            request.onerror = () => resolve(null);
+        });
+    },
+    
+    // Vérifier session avec validation améliorée
+    async hasActiveSession() {
+        // Vérifier localStorage d'abord
+        const session = localStorage.getItem('parent_session');
+        if (!session) return false;
+        
+        try {
+            const { matricule, timestamp } = JSON.parse(session);
+            // Session valable 30 jours
+            const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+            if (Date.now() - timestamp > thirtyDays) {
+                this.clearSession();
+                return false;
+            }
+            
+            // Vérifier que le parent existe toujours dans Firestore (si en ligne)
+            if (navigator.onLine) {
+                try {
+                    const parentDoc = await getDoc(doc(db, 'parents', matricule));
+                    if (!parentDoc.exists()) {
+                        this.clearSession();
+                        return false;
+                    }
+                } catch (error) {
+                    // Hors ligne, on fait confiance au cache
+                    console.log('Hors ligne, session validée par cache');
+                }
+            }
+            
+            return true;
+        } catch {
+            return false;
+        }
+    },
+    
+    // Mettre à jour l'activité
+    updateActivity() {
+        const session = this.getSession();
+        if (session) {
+            session.lastActivity = Date.now();
+            localStorage.setItem('parent_session', JSON.stringify(session));
+        }
+    }
+};
+
+// ============================================
+// INITIALISATION AVEC CACHE
+// ============================================
+
+let dataCache = null;
+let dataLoader = null;
+
+// Fonction d'initialisation améliorée
+async function initializeWithCache() {
+    // Initialiser le cache manager
+    dataCache = new DataCacheManager();
+    await dataCache.init();
+    
+    // Initialiser le data loader
+    dataLoader = new DataLoaderWithCache(dataCache);
+    
+    // Vérifier la session
+    const hasSession = await EnhancedSessionManager.hasActiveSession();
+    
+    if (hasSession) {
+        const session = EnhancedSessionManager.getSession();
+        if (session && session.matricule) {
+            // Charger les données depuis le cache d'abord
+            try {
+                const cachedParent = await dataCache.getCachedParent(session.matricule);
+                if (cachedParent) {
+                    currentParent = cachedParent;
+                    await initializeAppAfterLogin();
+                    console.log('✅ Application initialisée depuis le cache');
+                }
+            } catch (error) {
+                console.warn('Erreur chargement cache:', error);
+            }
+            
+            // Puis essayer de se connecter si en ligne
+            if (navigator.onLine) {
+                try {
+                    await autoLoginFromSession(session.matricule);
+                } catch (error) {
+                    console.log('Auto-login échoué, mais cache disponible');
+                }
+            }
+        }
+    }
+}
+
+// Auto-login depuis session
+async function autoLoginFromSession(matricule) {
+    try {
+        const parentDoc = await getDoc(doc(db, 'parents', matricule));
+        if (parentDoc.exists()) {
+            const parentData = parentDoc.data();
+            
+            // Si l'utilisateur Firebase n'est pas connecté, on essaie de le reconnecter
+            if (!auth.currentUser && parentData.authEmail) {
+                // Récupérer le mot de passe depuis le localStorage (optionnel)
+                const savedPassword = localStorage.getItem(`password_${matricule}`);
+                if (savedPassword) {
+                    await signInWithEmailAndPassword(auth, parentData.authEmail, savedPassword);
+                }
+            }
+        }
+    } catch (error) {
+        console.warn('Auto-login échoué:', error);
+        // Ne pas faire échouer l'initialisation
+    }
+}
+
+// Override de la fonction loadParentData existante pour utiliser le cache
+async function loadParentDataWithCache() {
+    if (!dataLoader || !currentParent) return;
+    
+    // Charger les enfants depuis le cache d'abord
+    let children = await dataLoader.loadChildren(currentParent.matricule, false);
+    
+    if (children.length > 0) {
+        childrenList = children;
+        updateAllSelectors();
+        updateChildrenPage();
+        console.log('✅ Enfants chargés depuis le cache');
+    }
+    
+    // Si en ligne, précharger toutes les données en arrière-plan
+    if (navigator.onLine) {
+        setTimeout(async () => {
+            console.log('🔄 Préchargement des données en arrière-plan...');
+            for (const child of childrenList) {
+                await dataLoader.preloadChildData(child, true);
+            }
+            console.log('✅ Préchargement terminé');
+        }, 3000);
+    }
+}
+
+// Mettre à jour tous les sélecteurs
+function updateAllSelectors() {
+    const selectors = [
+        'child-selector', 'presence-child-selector', 'payment-child-selector', 
+        'timetable-child-selector', 'secondary-grades-child-selector', 
+        'secondary-homework-child-selector', 'primary-grades-child-selector',
+        'primary-homework-child-selector', 'kindergarten-grades-child-selector',
+        'kindergarten-homework-child-selector', 'communique-child-selector'
+    ];
+    
+    selectors.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            const currentValue = el.value;
+            el.innerHTML = '<option value="">-- Sélectionner --</option>';
+            childrenList.forEach(child => {
+                const displayText = `${child.fullName} - ${child.class}`;
+                el.innerHTML += `<option value="${child.matricule}">${displayText}</option>`;
+            });
+            if (currentValue && childrenList.some(c => c.matricule === currentValue)) {
+                el.value = currentValue;
+            }
+        }
+    });
+}
+
+// Override des fonctions de chargement pour utiliser le cache
+async function loadChildDashboardWithCache(studentId) {
+    const child = childrenList.find(c => c.matricule === studentId);
+    if (!child) return;
+    
+    // Notes
+    const gradesBody = document.getElementById('child-grades-table-body');
+    if (child.type === 'secondary') {
+        const grades = await dataLoader.loadGrades(studentId, child.class, 'P1', false);
+        let html = '';
+        let i = 1;
+        
+        for (const grade of grades.slice(0, 5)) {
+            const studentGrade = grade.studentGrade;
+            const date = grade.evaluationDate?.toDate?.()?.toLocaleDateString() || 
+                        (grade.evaluationDate ? new Date(grade.evaluationDate).toLocaleDateString() : '');
+            html += `
+                <tr>
+                    <td>${i++}</td>
+                    <td>${grade.subject}</td>
+                    <td>${grade.gradeType || 'Devoir'}</td>
+                    <td>${studentGrade.grade}/${grade.maxPoints}</td>
+                    <td>${grade.teacherName}</td>
+                    <td>${date}</td>
+                </tr>
+            `;
+        }
+        gradesBody.innerHTML = html || '<tr><td colspan="6">Aucune note</td></tr>';
+    } else {
+        gradesBody.innerHTML = '<tr><td colspan="6">Notes non disponibles</td></tr>';
+    }
+    
+    // Présences
+    const attContainer = document.getElementById('attendance-container');
+    const now = new Date();
+    const attendance = await dataLoader.loadAttendance(studentId, now.getMonth(), now.getFullYear(), false);
+    let present = 0;
+    for (const att of attendance) {
+        if (att.status === 'present') present++;
+    }
+    const rate = attendance.length > 0 ? (present / attendance.length * 100).toFixed(0) : 0;
+    attContainer.innerHTML = `<p>Taux présence: <strong>${rate}%</strong> (${present}/${attendance.length})</p>`;
+    
+    // Devoirs
+    const hwContainer = document.getElementById('homework-container');
+    if (child.type === 'secondary') {
+        const homework = await dataLoader.loadHomework(child.class, false);
+        if (homework.length === 0) {
+            hwContainer.innerHTML = '<p>Aucun devoir récent</p>';
+        } else {
+            let html = '<ul>';
+            for (const hw of homework.slice(0, 5)) {
+                const date = hw.dueDate?.toDate?.()?.toLocaleDateString() || 
+                           (hw.dueDate ? new Date(hw.dueDate).toLocaleDateString() : '');
+                html += `<li><strong>${hw.subject}:</strong> ${hw.title} (${date})</li>`;
+            }
+            html += '</ul>';
+            hwContainer.innerHTML = html;
+        }
+    } else {
+        hwContainer.innerHTML = '<p>Devoirs non disponibles</p>';
+    }
+}
+
+// Override des autres fonctions de chargement
+async function loadChildMonthlyPresenceWithCache(studentId, month, year) {
+    const container = document.getElementById('monthly-presence-container');
+    container.innerHTML = '<div class="loading"><i class="fas fa-spinner fa-spin"></i><p>Chargement...</p></div>';
+    
+    const attendance = await dataLoader.loadAttendance(studentId, month, year, false);
+    
+    const monthlyPresence = {};
+    for (const att of attendance) {
+        monthlyPresence[att.date] = att.status;
+    }
+    
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    let presentCount = 0, absentCount = 0, lateCount = 0;
+    
+    for (let day = 1; day <= daysInMonth; day++) {
+        const dateStr = `${year}-${(month + 1).toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+        const status = monthlyPresence[dateStr];
+        if (status === 'present') presentCount++;
+        else if (status === 'absent') absentCount++;
+        else if (status === 'late') lateCount++;
+    }
+    
+    const totalDays = presentCount + absentCount + lateCount;
+    const presenceRate = totalDays > 0 ? ((presentCount / totalDays) * 100).toFixed(1) : 0;
+    
+    document.getElementById('presence-stats').innerHTML = `
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-number" style="color: #2e7d32;">${presentCount}</div>
+                <div class="stat-label">Présences</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" style="color: #c62828;">${absentCount}</div>
+                <div class="stat-label">Absences</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" style="color: #ef6c00;">${lateCount}</div>
+                <div class="stat-label">Retards</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" style="color: #1565c0;">${presenceRate}%</div>
+                <div class="stat-label">Taux de présence</div>
+            </div>
+        </div>
+    `;
+    
+    let calendarHTML = `
+        <h4 style="margin-bottom: 1rem;">${getMonthName(month)} ${year}</h4>
+        <div class="attendance-grid">
+    `;
+    
+    for (let day = 1; day <= daysInMonth; day++) {
+        const dateStr = `${year}-${(month + 1).toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+        const status = monthlyPresence[dateStr];
+        
+        let statusClass = 'attendance-empty';
+        let statusText = day.toString();
+        
+        if (status === 'present') {
+            statusClass = 'attendance-present';
+            statusText = '✓';
+        } else if (status === 'absent') {
+            statusClass = 'attendance-absent';
+            statusText = '✗';
+        } else if (status === 'late') {
+            statusClass = 'attendance-late';
+            statusText = '⌚';
+        }
+        
+        calendarHTML += `
+            <div class="attendance-day ${statusClass}" title="${dateStr}">
+                ${statusText}
+            </div>
+        `;
+    }
+    
+    calendarHTML += '</div>';
+    container.innerHTML = calendarHTML;
+}
+
+async function loadChildIncidentsWithCache(studentId) {
+    const container = document.getElementById('incidents-list-container');
+    container.innerHTML = '<div class="loading"><i class="fas fa-spinner fa-spin"></i><p>Chargement des incidents...</p></div>';
+    
+    const incidents = await dataLoader.loadIncidents(studentId, false);
+    
+    if (incidents.length === 0) {
+        container.innerHTML = `
+            <div class="no-data">
+                <i class="fas fa-check-circle" style="color: #3498db;"></i>
+                <h3>Aucun incident</h3>
+                <p>Aucun incident signalé pour cet enfant.</p>
+            </div>
+        `;
+        return;
+    }
+    
+    let html = '';
+    for (const incident of incidents) {
+        const date = incident.createdAt ? 
+            (incident.createdAt.toDate ? 
+                incident.createdAt.toDate().toLocaleDateString('fr-FR', {
+                    day: '2-digit', month: '2-digit', year: 'numeric',
+                    hour: '2-digit', minute: '2-digit'
+                }) : new Date(incident.createdAt).toLocaleDateString('fr-FR')) : 'Date inconnue';
+        
+        const severity = incident.severity || 'moyen';
+        const severityClass = `severity-${severity}`;
+        
+        let icon = 'fa-exclamation-triangle';
+        if (incident.type === 'retard') icon = 'fa-clock';
+        else if (incident.type === 'absenteisme') icon = 'fa-calendar-times';
+        else if (incident.type === 'comportement') icon = 'fa-exclamation-circle';
+        
+        html += `
+            <div class="incident-item ${severityClass}">
+                <div class="incident-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.8rem;">
+                    <span class="incident-type">
+                        <i class="fas ${icon}"></i> ${incident.type || 'Incident'}
+                    </span>
+                    <span class="incident-date">
+                        <i class="far fa-calendar-alt"></i> ${date}
+                    </span>
+                </div>
+                <div class="incident-description">
+                    ${incident.description || 'Aucune description fournie.'}
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem;">
+                    <span class="incident-severity ${severityClass}">
+                        <i class="fas ${severity === 'eleve' ? 'fa-exclamation-circle' : 
+                                      severity === 'moyen' ? 'fa-info-circle' : 
+                                      'fa-check-circle'}"></i>
+                        ${severity === 'eleve' ? 'Élevé' : 
+                          severity === 'moyen' ? 'Moyen' : 'Faible'}
+                    </span>
+                    ${incident.resolved ? 
+                        '<span class="badge badge-success"><i class="fas fa-check"></i> Résolu</span>' : 
+                        '<span class="badge badge-info"><i class="fas fa-hourglass-half"></i> En cours</span>'}
+                </div>
+                ${incident.teacherName ? `
+                    <div style="margin-top: 0.8rem; font-size: 0.85rem; color: #666; border-top: 1px dashed #eee; padding-top: 0.8rem;">
+                        <i class="fas fa-chalkboard-teacher"></i> Signalé par: ${incident.teacherName}
+                    </div>
+                ` : ''}
+            </div>
+        `;
+    }
+    
+    container.innerHTML = html;
+}
+
+// ============================================
+// MODIFICATION DE LA FONCTION D'INITIALISATION
+// ============================================
+
+// Remplacer la fonction initializeAppAfterLogin existante
+const originalInitializeAppAfterLogin = initializeAppAfterLogin;
+window.initializeAppAfterLogin = async function() {
+    await originalInitializeAppAfterLogin();
+    
+    // Charger les données avec cache
+    await loadParentDataWithCache();
+    
+    // Remplacer les event listeners des sélecteurs pour utiliser les versions avec cache
+    const childSelector = document.getElementById('child-selector');
+    if (childSelector) {
+        const oldListener = childSelector.getAttribute('data-listener');
+        if (!oldListener) {
+            childSelector.setAttribute('data-listener', 'true');
+            childSelector.addEventListener('change', async (e) => {
+                const id = e.target.value;
+                const content = document.getElementById('child-dashboard-content');
+                if (!id) {
+                    content.classList.add('hidden');
+                    return;
+                }
+                content.classList.remove('hidden');
+                await loadChildDashboardWithCache(id);
+            });
+        }
+    }
+    
+    const presenceSelector = document.getElementById('presence-child-selector');
+    if (presenceSelector) {
+        const oldListener = presenceSelector.getAttribute('data-listener');
+        if (!oldListener) {
+            presenceSelector.setAttribute('data-listener', 'true');
+            presenceSelector.addEventListener('change', async (e) => {
+                const id = e.target.value;
+                const content = document.getElementById('presence-incidents-content');
+                if (!id) {
+                    content.classList.add('hidden');
+                    return;
+                }
+                content.classList.remove('hidden');
+                await loadChildIncidentsWithCache(id);
+                await loadChildMonthlyPresenceWithCache(
+                    id, 
+                    parseInt(document.getElementById('presence-month').value), 
+                    parseInt(document.getElementById('presence-year').value)
+                );
+            });
+        }
+    }
+    
+    const loadPresenceBtn = document.getElementById('load-presence-btn');
+    if (loadPresenceBtn) {
+        const oldListener = loadPresenceBtn.getAttribute('data-listener');
+        if (!oldListener) {
+            loadPresenceBtn.setAttribute('data-listener', 'true');
+            loadPresenceBtn.addEventListener('click', async () => {
+                const id = document.getElementById('presence-child-selector').value;
+                if (!id) {
+                    showAlert('Sélectionnez un enfant', 'error');
+                    return;
+                }
+                await loadChildMonthlyPresenceWithCache(
+                    id, 
+                    parseInt(document.getElementById('presence-month').value), 
+                    parseInt(document.getElementById('presence-year').value)
+                );
+            });
+        }
+    }
+    
+    // Mettre à jour l'activité régulièrement
+    setInterval(() => {
+        EnhancedSessionManager.updateActivity();
+    }, 5 * 60 * 1000); // Toutes les 5 minutes
+};
+
+// ============================================
+// DÉMARRAGE DE L'APPLICATION
+// ============================================
+
+// Remplacer l'initialisation DOMContentLoaded
+document.addEventListener('DOMContentLoaded', async () => {
+    console.log('🚀 Application démarrée avec cache local');
+    
+    // Initialiser le cache manager et le data loader
+    dataCache = new DataCacheManager();
+    await dataCache.init();
+    dataLoader = new DataLoaderWithCache(dataCache);
+    
+    // Vérifier la session existante
+    const hasSession = await EnhancedSessionManager.hasActiveSession();
+    
+    if (hasSession) {
+        const session = EnhancedSessionManager.getSession();
+        if (session && session.matricule) {
+            // Essayer de charger depuis le cache immédiatement
+            try {
+                const cachedParent = await dataCache.getCachedParent(session.matricule);
+                if (cachedParent) {
+                    currentParent = cachedParent;
+                    await originalInitializeAppAfterLogin();
+                    await loadParentDataWithCache();
+                    console.log('✅ Application chargée depuis le cache');
+                }
+            } catch (error) {
+                console.warn('Erreur chargement cache:', error);
+            }
+            
+            // Si en ligne, essayer de se connecter pour mettre à jour
+            if (navigator.onLine) {
+                try {
+                    await autoLoginFromSession(session.matricule);
+                } catch (error) {
+                    console.log('Auto-login échoué, utilisation du cache');
+                }
+            }
+        }
+    }
+    
+    // Configurer les listeners pour le cache
+    setupOfflineListeners();
+    
+    // Charger les notifications
+    NotificationManager.loadNotifications();
+    
+    // Configurer le sélecteur de mois pour les présences
+    const monthSelect = document.getElementById('presence-month');
+    if (monthSelect) {
+        monthSelect.value = new Date().getMonth();
+    }
+});
+
+// Configuration des écouteurs pour le mode hors ligne
+function setupOfflineListeners() {
+    window.addEventListener('online', () => {
+        console.log('📶 Connexion rétablie - Synchronisation');
+        if (currentParent) {
+            loadParentDataWithCache();
+        }
+    });
+    
+    window.addEventListener('offline', () => {
+        console.log('📴 Mode hors ligne - Utilisation du cache');
+        showToast('Mode hors ligne - Données en cache', 'warning');
+    });
+}
 </script>
 </body>
 </html>
