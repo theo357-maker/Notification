@@ -469,3 +469,142 @@ setInterval(async () => {
     console.error('❌ Erreur nettoyage:', error);
   }
 }, 24 * 60 * 60 * 1000);
+
+// ============================================
+// SYNC DES DONNÉES HORS LIGNE - AMÉLIORÉ
+// ============================================
+
+const SYNC_QUEUE_NAME = 'sync-queue';
+const MAX_RETRY = 3;
+
+class SyncQueue {
+    constructor() {
+        this.queue = [];
+        this.loadQueue();
+    }
+    
+    async loadQueue() {
+        const cache = await caches.open('sync-queue-cache');
+        const response = await cache.match('/sync-queue');
+        if (response) {
+            this.queue = await response.json();
+        }
+    }
+    
+    async saveQueue() {
+        const cache = await caches.open('sync-queue-cache');
+        const response = new Response(JSON.stringify(this.queue));
+        await cache.put('/sync-queue', response);
+    }
+    
+    add(item) {
+        item.id = Date.now().toString() + '_' + Math.random().toString(36);
+        item.retryCount = 0;
+        item.timestamp = Date.now();
+        this.queue.push(item);
+        this.saveQueue();
+        this.processQueue();
+    }
+    
+    async processQueue() {
+        if (this.processing) return;
+        this.processing = true;
+        
+        try {
+            const clients = await self.clients.matchAll();
+            const isOnline = clients.some(client => client.navigator.onLine);
+            
+            if (!isOnline) {
+                console.log('Hors ligne, synchronisation différée');
+                this.processing = false;
+                return;
+            }
+            
+            const toProcess = [...this.queue];
+            for (const item of toProcess) {
+                try {
+                    await this.processItem(item);
+                    this.queue = this.queue.filter(i => i.id !== item.id);
+                    await this.saveQueue();
+                    console.log(`✅ Item ${item.id} synchronisé`);
+                } catch (error) {
+                    item.retryCount++;
+                    if (item.retryCount >= MAX_RETRY) {
+                        this.queue = this.queue.filter(i => i.id !== item.id);
+                        await this.saveQueue();
+                        console.log(`❌ Item ${item.id} abandonné après ${MAX_RETRY} tentatives`);
+                    } else {
+                        console.log(`⚠️ Échec item ${item.id}, retry ${item.retryCount}/${MAX_RETRY}`);
+                    }
+                }
+            }
+        } finally {
+            this.processing = false;
+        }
+    }
+    
+    async processItem(item) {
+        // Implémenter le traitement selon le type
+        switch (item.type) {
+            case 'grade_submission':
+                await this.syncGradeSubmission(item);
+                break;
+            case 'payment_request':
+                await this.syncPaymentRequest(item);
+                break;
+            case 'message':
+                await this.syncMessage(item);
+                break;
+            default:
+                console.warn('Type inconnu:', item.type);
+        }
+    }
+    
+    async syncGradeSubmission(item) {
+        const response = await fetch('https://firestore.googleapis.com/v1/projects/theo1d/databases/(default)/documents/homework_submissions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(item.data)
+        });
+        if (!response.ok) throw new Error('Sync failed');
+    }
+    
+    async syncPaymentRequest(item) {
+        const response = await fetch('https://firestore.googleapis.com/v1/projects/theo1d/databases/(default)/documents/payment_requests', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(item.data)
+        });
+        if (!response.ok) throw new Error('Sync failed');
+    }
+    
+    async syncMessage(item) {
+        const response = await fetch('https://firestore.googleapis.com/v1/projects/theo1d/databases/(default)/documents/messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(item.data)
+        });
+        if (!response.ok) throw new Error('Sync failed');
+    }
+}
+
+const syncQueue = new SyncQueue();
+
+// Écouter les messages du client pour ajouter à la queue
+self.addEventListener('message', event => {
+    if (event.data.type === 'QUEUE_SYNC') {
+        syncQueue.add(event.data.item);
+        event.ports[0].postMessage({ status: 'queued', id: event.data.item.id });
+    }
+});
+
+// Synchronisation périodique
+setInterval(() => {
+    syncQueue.processQueue();
+}, 30000); // Toutes les 30 secondes
+
+// Synchronisation au retour en ligne
+self.addEventListener('online', () => {
+    console.log('📶 Connexion rétablie - Synchronisation');
+    syncQueue.processQueue();
+});
